@@ -226,6 +226,9 @@ The next build recreates and reseeds it.
 | `SQLITE_READONLY` / cannot write DB | `/data` not owned by uid 1001 |
 | Build fails fetching Debian packages | A dropped download in the `deps` stage. The Dockerfile sets `Acquire::Retries=5`; on a very slow link the ~73MB of build-tool packages can still time out — rebuild, the layer cache keeps the rest |
 | Port 3100 already in use | A stale container or another service; `docker ps` then `docker rm -f` |
+| Jenkins REST POST returns 403 "No valid crumb" | The crumb is bound to the HTTP session — send the crumb *and* the same cookie jar (`curl -b jar -c jar`) |
+| A form POST returns 302 and you assume it failed | Jenkins answers a successful form submit with a redirect; verify by reading the object back, not by the status code |
+| `/credential/<id>/updateSubmit` returns 500 | It wants a different, form-shaped payload than `createCredentials`; delete and recreate instead (what the script does) |
 
 ## Relationship to the other pipelines
 
