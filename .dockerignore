@@ -13,7 +13,9 @@ npm-debug.log*
 README.md
 docs
 infra
+# tests/ is kept in the build context: the Jenkins pipeline runs Vitest inside
+# the builder stage. It never reaches the runner image, which copies only
+# .next/standalone, .next/static and public.
 e2e
-tests
 playwright-report
 test-results

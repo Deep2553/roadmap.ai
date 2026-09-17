@@ -24,6 +24,19 @@ async function main() {
   const adminEmail = process.env.SEED_ADMIN_EMAIL ?? "admin@roadmap.ai";
   const adminPassword = process.env.SEED_ADMIN_PASSWORD ?? "ChangeMe123!";
 
+  // Idempotent: seeding an already-seeded database used to fail with a bare
+  // "UNIQUE constraint failed: users.email" from the admin insert below. Exit
+  // early instead, so an automated deploy can run this unconditionally and a
+  // second local `npm run db:seed` is a no-op rather than a confusing crash.
+  // `db.query.*` rather than `db.select().from()`: `db` is a union of the
+  // better-sqlite3 and libsql drivers (lib/db/client.ts), and the query-builder
+  // chain does not typecheck across that union.
+  const existing = await db.query.users.findFirst({ columns: { id: true } });
+  if (existing) {
+    console.log("Database already has users — seed skipped.");
+    return;
+  }
+
   const [admin] = await db
     .insert(users)
     .values({
@@ -117,7 +130,10 @@ async function main() {
     });
   }
 
-  console.log("Seeded database. Admin login:", adminEmail, "/", adminPassword);
+  // Never log the password: this output ends up in CI consoles and shared
+  // terminals. The value is SEED_ADMIN_PASSWORD, or the default documented
+  // in README.md.
+  console.log("Seeded database. Admin email:", adminEmail);
 }
 
 main().then(() => process.exit(0)).catch((err) => {

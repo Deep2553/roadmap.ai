@@ -4,8 +4,13 @@ FROM node:22-slim AS deps
 WORKDIR /app
 # better-sqlite3 (local-dev-only DB driver) has no prebuilt binary for every
 # platform/Node combo and falls back to compiling from source via node-gyp.
-RUN apt-get update && apt-get install -y --no-install-recommends \
-  python3 make g++ \
+# Acquire::Retries — apt does not retry a dropped download by default, and this
+# stage pulls ~73MB of build tooling; on a slow link the 10MB gcc-12 package
+# reliably stalls out ("Connection failed"), failing the build after ~9 minutes.
+# Both apt-get invocations need the flags — index fetches drop too.
+RUN apt-get -o Acquire::Retries=5 -o Acquire::http::Timeout=60 update \
+  && apt-get -o Acquire::Retries=5 -o Acquire::http::Timeout=60 install -y \
+  --no-install-recommends python3 make g++ \
   && rm -rf /var/lib/apt/lists/*
 COPY package.json package-lock.json ./
 RUN npm ci

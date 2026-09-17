@@ -56,6 +56,12 @@ Deploys are handled by Vercel's native GitHub integration (connect it once in th
 
 `Dockerfile` + `docker-compose.yml` at the repo root run this as a single self-hosted container (Turso stays the database either way). `infra/aws/` has a Terraform module that provisions one EC2 instance for this — it was stood up, verified working, and then `terraform destroy`'d once the exercise was done, so nothing is running or billing on AWS right now. See `docs/AWS_DEPLOYMENT_PLAN.md` and `docs/aws-runbook.md` for the full setup and a "Phase 2.1" note on pushing images to a registry instead of building on the host.
 
+### Local Jenkins pipeline
+
+`Jenkinsfile` at the repo root defines a declarative pipeline for a Jenkins instance running on your own machine (`localhost:8080`): it builds the Docker image, runs lint/typecheck/unit tests in parallel inside it, migrates and seeds a SQLite database held in a named Docker volume, redeploys the container on `127.0.0.1:3100`, and smoke-tests the landing page, `/api/auth/csrf`, and a seeded track page. It is independent of the Vercel deployment — nothing in it touches production.
+
+Every Node step runs inside a container built from this repo's `Dockerfile`, because the `jenkins` system user has no Node of its own. `AUTH_SECRET` and the seed admin password are generated on the first build into 0600 files outside the Jenkins workspace and never printed to the build console. Setup, triggering (SCM polling by default — GitHub webhooks can't reach `localhost`), secret handling, and troubleshooting are in `docs/jenkins-cicd.md`.
+
 ## Security
 
 - **Headers**: CSP, `X-Frame-Options: DENY`, `X-Content-Type-Options: nosniff`, `Referrer-Policy`, `Permissions-Policy`, and no `X-Powered-By` — configured in `next.config.ts`.
