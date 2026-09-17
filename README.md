@@ -8,7 +8,7 @@ Built with Next.js App Router, TypeScript, Tailwind v4 + shadcn/ui, Drizzle ORM 
 
 ```bash
 npm install
-cp .env.example .env.local   # generates one AUTH_SECRET; edit values as needed
+cp .env.example .env.local   # then set AUTH_SECRET (the file shows the one-liner)
 npm run db:migrate
 npm run db:seed              # creates sample DevOps + Cloud Engineering tracks and an admin user
 npm run dev
