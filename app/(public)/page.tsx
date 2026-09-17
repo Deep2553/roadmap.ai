@@ -19,7 +19,7 @@ export default async function HomePage() {
             <MapPin className="size-3" /> Plot your route, not just a checklist
           </span>
           <h1 className="mt-6 font-heading text-5xl font-semibold tracking-tight sm:text-6xl">
-            Learning Deep, mapped like a trail.
+            Learning Deep with samarth, mapped like a trail.
           </h1>
           <p className="mx-auto mt-5 max-w-xl text-lg text-muted-foreground">
             TWS Roadmaps turns DevOps, Cloud, and other technical journeys into a
