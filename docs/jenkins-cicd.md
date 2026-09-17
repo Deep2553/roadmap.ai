@@ -44,38 +44,51 @@ test at that address instead.
    sudo systemctl restart jenkins
    ```
 
-2. **Create the Docker Hub credential and the job.** `scripts/setup-jenkins.sh`
+2. **Store the credentials and create the job.** `scripts/setup-jenkins.sh`
    does both through the Jenkins REST API, reading each secret from a file so
-   that no secret ever lands on a command line (where `ps` exposes it to every
-   user on the host) or in the script's output:
+   that no secret lands on a command line (where `ps` exposes it to every user
+   on the host) or in the script's output:
 
    ```bash
    umask 077
    printf '%s' '<jenkins admin password>' > ~/.jenkins-admin.pw
    printf '%s' '<docker hub PAT>'         > ~/.dockerhub.pat
-   chmod 600 ~/.jenkins-admin.pw ~/.dockerhub.pat
+   printf '%s' '<github PAT>'             > ~/.github.pat
+   chmod 600 ~/.jenkins-admin.pw ~/.dockerhub.pat ~/.github.pat
 
-   scripts/setup-jenkins.sh ~/.jenkins-admin.pw ~/.dockerhub.pat
+   scripts/setup-jenkins.sh ~/.jenkins-admin.pw ~/.dockerhub.pat ~/.github.pat [branch]
    ```
 
-   Prefix those `printf` lines with a space (with `HISTCONTROL=ignorespace`, the
-   default on most distros) to keep them out of your shell history, and delete
-   both files once the credential is stored — Jenkins keeps its own encrypted
-   copy, and the pipeline never reads these files again.
+   Prefix those `printf` lines with a space (`HISTCONTROL=ignorespace`, the
+   default on most distros) to keep them out of your shell history, then
+   `shred -u` all three once the script has run — Jenkins keeps its own
+   encrypted copies and the pipeline never reads these files again.
 
-   The script is idempotent: it updates the credential and job config if they
-   already exist. It creates a *Pipeline script from SCM* job named `roadmap-ai`
-   pointed at `https://github.com/Deep2553/roadmap.ai.git`, branch `main`,
-   script path `Jenkinsfile`.
+   It stores two username/password credentials in the **Jenkins credential
+   store** (never in this repo):
+
+   | Credential ID | Username | Secret | Used by |
+   |---|---|---|---|
+   | `dockerhub-deep2553` | `deep2553` | Docker Hub PAT | `Push image` / `Promote :latest`, bound as `DH_USER` + `DH_TOKEN` |
+   | `github-deep2553` | `Deep2553` | GitHub PAT | The job's SCM checkout |
+
+   The pipeline reads the Docker Hub pair with
+   `withCredentials([usernamePassword(credentialsId: env.REGISTRY_CREDS,
+   usernameVariable: 'DH_USER', passwordVariable: 'DH_TOKEN')])`, so the values
+   exist only as environment variables inside those two stages, are masked in the
+   build log by Jenkins, and reach `docker login` through `--password-stdin`.
+
+   The script is idempotent — rerunning updates the existing credentials and job
+   config — and takes an optional branch argument (default `main`) so you can
+   build a feature branch before merging.
 
 3. **Run one build manually** (`Build Now`). Jenkins only reads the
    `triggers { pollSCM(...) }` block out of the `Jenkinsfile` after it has
    checked the repo out once, so polling does not start until the first build
    has run.
 
-The repo is public, so Jenkins clones it anonymously — no GitHub credential is
-needed. For a private repo, add a GitHub PAT as a Jenkins credential and
-reference it in the job's SCM config; never inline it in the `Jenkinsfile`.
+The job checks out with the stored `github-deep2553` credential, so it keeps
+working if the repo is ever made private.
 
 ## Stages
 
