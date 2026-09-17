@@ -30,6 +30,11 @@ pipeline {
 
   environment {
     IMAGE       = 'roadmap-ai'
+    // Docker Hub repo the verified image is published to. The credential is a
+    // username + PAT pair stored in Jenkins' credential store under this ID —
+    // never in this file.
+    REGISTRY_IMAGE  = 'deep2553/roadmap-ai'
+    REGISTRY_CREDS  = 'dockerhub-deep2553'
     CONTAINER   = 'roadmap-ai-app'
     DATA_VOLUME = 'roadmap-ai-data'
     APP_PORT    = '3100'
@@ -97,6 +102,29 @@ pipeline {
         // :latest is applied after the smoke test, not here, so that the tag
         // always names a build that actually served traffic.
         sh 'docker build -t "$IMAGE:$BUILD_NUMBER" .'
+      }
+    }
+
+    stage('Push image') {
+      steps {
+        // Only the build-numbered tag goes up here. :latest is pushed after the
+        // smoke test, so that tag never names a build that failed to serve.
+        withCredentials([usernamePassword(credentialsId: env.REGISTRY_CREDS,
+                                          usernameVariable: 'DH_USER',
+                                          passwordVariable: 'DH_TOKEN')]) {
+          sh '''
+            set -e
+            # Jenkins masks bound credentials in the log, but the -xe trace would
+            # still show the surrounding command shape; keep it off regardless.
+            set +x
+            # --password-stdin, never as an argv: a token on a command line is
+            # visible in the process list to every user on this host.
+            printf '%s' "$DH_TOKEN" | docker login -u "$DH_USER" --password-stdin >/dev/null
+            docker tag "$IMAGE:$BUILD_NUMBER" "$REGISTRY_IMAGE:$BUILD_NUMBER"
+            docker push -q "$REGISTRY_IMAGE:$BUILD_NUMBER"
+            echo "Pushed $REGISTRY_IMAGE:$BUILD_NUMBER"
+          '''
+        }
       }
     }
 
@@ -190,6 +218,9 @@ pipeline {
         sh '''
           set -e
           docker rm -f "$CONTAINER" >/dev/null 2>&1 || true
+          # Runs the tag that was just pushed, so the deploy exercises the same
+          # image artifact that ended up in the registry. The layers are already
+          # local, so this does not pull.
           # Published on loopback only. A LAN-reachable port here would expose an
           # app with an auto-seeded admin account, and Docker's NAT rules bypass
           # ufw, so a host firewall would not save you.
@@ -200,7 +231,7 @@ pipeline {
             --env-file "$ENV_FILE" \
             -e SQLITE_PATH=/data/sqlite.db \
             -v "$DATA_VOLUME":/data \
-            "$IMAGE:$BUILD_NUMBER"
+            "$REGISTRY_IMAGE:$BUILD_NUMBER"
         '''
       }
     }
@@ -240,10 +271,29 @@ pipeline {
             exit 1
           fi
 
-          # Only now is this build known good, so only now does it get :latest.
-          docker tag "$IMAGE:$BUILD_NUMBER" "$IMAGE:latest"
           echo "Build $BUILD_NUMBER live at http://localhost:$APP_PORT"
         '''
+      }
+    }
+
+    stage('Promote :latest') {
+      steps {
+        // Reached only if the smoke test passed, so :latest — locally and on
+        // Docker Hub — always names a build that actually served traffic. It is
+        // therefore the tag to roll back to.
+        withCredentials([usernamePassword(credentialsId: env.REGISTRY_CREDS,
+                                          usernameVariable: 'DH_USER',
+                                          passwordVariable: 'DH_TOKEN')]) {
+          sh '''
+            set -e
+            set +x
+            printf '%s' "$DH_TOKEN" | docker login -u "$DH_USER" --password-stdin >/dev/null
+            docker tag "$IMAGE:$BUILD_NUMBER" "$IMAGE:latest"
+            docker tag "$IMAGE:$BUILD_NUMBER" "$REGISTRY_IMAGE:latest"
+            docker push -q "$REGISTRY_IMAGE:latest"
+            echo "Promoted $REGISTRY_IMAGE:latest to build $BUILD_NUMBER"
+          '''
+        }
       }
     }
   }
@@ -251,13 +301,19 @@ pipeline {
   post {
     always {
       sh '''
+        # Drops the registry credential from ~/.docker/config.json.
+        docker logout >/dev/null 2>&1 || true
         docker rmi "$IMAGE:ci-$BUILD_NUMBER" >/dev/null 2>&1 || true
-        # Keep the three most recent runtime tags and drop older ones. Scoped to
-        # $IMAGE on purpose: a bare `docker image prune` would also delete
-        # unrelated dangling images belonging to everything else on this host.
-        docker images --format '{{.Repository}}:{{.Tag}}' "$IMAGE" \
-          | grep -E ':[0-9]+$' | sort -t: -k2 -rn | tail -n +4 \
-          | xargs -r -n1 docker rmi >/dev/null 2>&1 || true
+        # Keep the three most recent numbered tags of each local repo and drop
+        # older ones. Scoped to these two repos on purpose: a bare
+        # `docker image prune` would also delete unrelated dangling images
+        # belonging to everything else on this host. Docker Hub keeps its own
+        # history and is not touched here.
+        for repo in "$IMAGE" "$REGISTRY_IMAGE"; do
+          docker images --format '{{.Repository}}:{{.Tag}}' "$repo" \
+            | grep -E ':[0-9]+$' | sort -t: -k2 -rn | tail -n +4 \
+            | xargs -r -n1 docker rmi >/dev/null 2>&1 || true
+        done
       '''
     }
     failure {

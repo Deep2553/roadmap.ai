@@ -13,6 +13,9 @@ stays on Vercel's native Git integration and is unaffected by this pipeline).
 | Data volume | `roadmap-ai-data` (holds `sqlite.db`) |
 | Runtime env file | `$JENKINS_HOME/roadmap-ai/.env.production`, mode 0600 |
 | Seed admin credentials | `$JENKINS_HOME/roadmap-ai/.admin-credentials`, mode 0600 |
+| Docker Hub repo | `deep2553/roadmap-ai` |
+| Docker Hub credential | Jenkins credential ID `dockerhub-deep2553` (username + PAT) |
+| Job | `http://localhost:8080/job/roadmap-ai/` |
 
 ## Why everything runs in a container
 
@@ -41,19 +44,38 @@ test at that address instead.
    sudo systemctl restart jenkins
    ```
 
-2. **Create the job.** Jenkins → New Item → *Pipeline*:
-   - Pipeline → Definition: **Pipeline script from SCM**
-   - SCM: Git, Repository URL `https://github.com/LondheShubham153/roadmap.ai`
-     (or the local path `/home/admin1/Documents/roadmap.ai` for a workspace-local
-     job — note `jenkins` needs read access to it)
-   - Branch: `*/main`
-   - Script Path: `Jenkinsfile`
-   - Save, then **Build Now** once. The `triggers` block in the `Jenkinsfile` only
-     takes effect after the first build has run and Jenkins has read the file.
+2. **Create the Docker Hub credential and the job.** `scripts/setup-jenkins.sh`
+   does both through the Jenkins REST API, reading each secret from a file so
+   that no secret ever lands on a command line (where `ps` exposes it to every
+   user on the host) or in the script's output:
 
-No credentials are needed for a public repo. For a private one, add a GitHub PAT
-as a Jenkins credential and select it in the SCM section — never inline it in the
-`Jenkinsfile`.
+   ```bash
+   umask 077
+   printf '%s' '<jenkins admin password>' > ~/.jenkins-admin.pw
+   printf '%s' '<docker hub PAT>'         > ~/.dockerhub.pat
+   chmod 600 ~/.jenkins-admin.pw ~/.dockerhub.pat
+
+   scripts/setup-jenkins.sh ~/.jenkins-admin.pw ~/.dockerhub.pat
+   ```
+
+   Prefix those `printf` lines with a space (with `HISTCONTROL=ignorespace`, the
+   default on most distros) to keep them out of your shell history, and delete
+   both files once the credential is stored — Jenkins keeps its own encrypted
+   copy, and the pipeline never reads these files again.
+
+   The script is idempotent: it updates the credential and job config if they
+   already exist. It creates a *Pipeline script from SCM* job named `roadmap-ai`
+   pointed at `https://github.com/Deep2553/roadmap.ai.git`, branch `main`,
+   script path `Jenkinsfile`.
+
+3. **Run one build manually** (`Build Now`). Jenkins only reads the
+   `triggers { pollSCM(...) }` block out of the `Jenkinsfile` after it has
+   checked the repo out once, so polling does not start until the first build
+   has run.
+
+The repo is public, so Jenkins clones it anonymously — no GitHub credential is
+needed. For a private repo, add a GitHub PAT as a Jenkins credential and
+reference it in the job's SCM config; never inline it in the `Jenkinsfile`.
 
 ## Stages
 
@@ -63,10 +85,12 @@ as a Jenkins credential and select it in the SCM section — never inline it in 
 | Build CI image | `docker build --target builder` — full source + devDependencies, `next build` already run |
 | Verify | `npm run lint`, `npm run typecheck`, `npm test` in parallel, each in a throwaway container |
 | Build runtime image | Full `Dockerfile` build (standalone runner stage), tagged `$BUILD_NUMBER` only |
+| Push image | `docker login` via `--password-stdin`, then pushes `deep2553/roadmap-ai:$BUILD_NUMBER`. Only the numbered tag — `:latest` waits for the smoke test |
 | Prepare runtime secrets | Generates `AUTH_SECRET` and the seed admin password on first build only, into 0600 files outside the workspace |
 | Migrate database | Stops the old container, runs `db:migrate` against the volume, then `db:seed` (which self-skips on an already-seeded DB), then `chown`s the data to uid 1001 |
-| Deploy | Replaces the running container, publishing `127.0.0.1:3100:3000` with the data volume mounted |
-| Smoke test | Polls `/` for a 200, then `/api/auth/csrf` (catches a missing or broken `AUTH_SECRET`, which only 500s on auth routes), then `/tracks/devops` (catches a database that migrated but never seeded). Promotes `:latest` only once all three pass |
+| Deploy | Replaces the running container from the tag just pushed, publishing `127.0.0.1:3100:3000` with the data volume mounted |
+| Smoke test | Polls `/` for a 200, then `/api/auth/csrf` (catches a missing or broken `AUTH_SECRET`, which only 500s on auth routes), then `/tracks/devops` (catches a database that migrated but never seeded) |
+| Promote :latest | Reached only when the smoke test passed: tags `:latest` locally and pushes `deep2553/roadmap-ai:latest` |
 
 `post { always }` drops the per-build `ci-*` tag and reaps old numbered runtime
 tags, keeping the three newest; a failure dumps the last 80 container log lines.
@@ -80,11 +104,21 @@ inside that image sees the generated `.next/types/**`, which the GitHub Actions
 typecheck does not — so Jenkins is strictly stricter, and a PR that passed CI can
 still fail here.
 
-There is no rollback. Deploy removes the old container before starting the new
-one, so a failed `docker run` leaves nothing serving, and a failed smoke test
-leaves the new (broken) container running. `:latest` always names the last build
-that passed its smoke test, so `docker run "$IMAGE:latest"` is the manual way
-back.
+There is no automatic rollback. Deploy removes the old container before starting
+the new one, so a failed `docker run` leaves nothing serving, and a failed smoke
+test leaves the new (broken) container running. Both `roadmap-ai:latest` locally
+and `deep2553/roadmap-ai:latest` on Docker Hub always name the last build that
+passed its smoke test, so those are the tags to roll back to:
+
+```bash
+docker rm -f roadmap-ai-app
+docker run -d --name roadmap-ai-app --restart unless-stopped \
+  -p 127.0.0.1:3100:3000 --env-file /var/lib/jenkins/roadmap-ai/.env.production \
+  -e SQLITE_PATH=/data/sqlite.db -v roadmap-ai-data:/data \
+  deep2553/roadmap-ai:latest
+```
+
+Any earlier build is `deep2553/roadmap-ai:<build number>`.
 
 ## Triggering
 
@@ -109,7 +143,16 @@ artifacts. Later builds reuse them.
   the default documented in `README.md`, so a fresh deploy doesn't come up with a
   publicly known admin login.
 
-Neither value is ever echoed. The `Prepare runtime secrets` stage starts with
+The **Docker Hub PAT** is not in either file — it lives in Jenkins' own
+credential store under the ID `dockerhub-deep2553`, bound into the two stages
+that need it with `withCredentials`. Jenkins masks bound credentials in the build
+log, and the stages additionally `set +x` and pipe the token through
+`docker login --password-stdin` rather than passing it as an argument, where it
+would be visible in `ps` to every user on the host. `post { always }` runs
+`docker logout` so the credential does not linger in the agent's
+`~/.docker/config.json`.
+
+Neither generated value is ever echoed. The `Prepare runtime secrets` stage starts with
 `set +x` for this reason: Jenkins runs `sh` steps as `/bin/sh -xe`, and that trace
 would otherwise print each expanded command — including the generated secrets —
 straight into the build console. Keep `set +x` at the top of any stage that
